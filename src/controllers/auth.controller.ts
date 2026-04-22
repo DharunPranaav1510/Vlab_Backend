@@ -40,7 +40,6 @@ export const authController = {
   async register(req: Request, res: Response) {
     const input = registerSchema.parse(req.body) as RegisterInput;
 
-    // 🔥 FIX: avoid TS mismatch
     const user = await authService.register(input as any);
 
     return res.status(201).json({
@@ -55,13 +54,13 @@ export const authController = {
   async login(req: Request, res: Response) {
     const input = loginSchema.parse(req.body) as LoginInput;
 
-    // 🔥 FIX: avoid TS mismatch
     const { user, token } = await authService.login(input as any);
 
+    // 🔥 FIX: correct cookie for cross-origin
     res.cookie("token", token, {
       httpOnly: true,
-      sameSite: "lax",
-      secure: true
+      sameSite: "none",   // ✅ REQUIRED
+      secure: true        // ✅ REQUIRED (HTTPS)
     });
 
     return res.json({
@@ -84,10 +83,11 @@ export const authController = {
 
     const token = authService.signToken(user);
 
+    // 🔥 FIX here also
     res.cookie("token", token, {
       httpOnly: true,
-      sameSite: "lax",
-      secure: false
+      sameSite: "none",
+      secure: true
     });
 
     return res.json({
@@ -139,7 +139,11 @@ export const authController = {
   },
 
   logout(_req: Request, res: Response) {
-    res.clearCookie("token");
+    res.clearCookie("token", {
+      httpOnly: true,
+      sameSite: "none",
+      secure: true
+    });
 
     return res.json({ success: true });
   }
