@@ -5,15 +5,22 @@ import { requireAuth, AuthedRequest } from "../../middleware/auth.js";
 
 const router = Router();
 
+/* =======================
+   GET PROJECTS
+======================= */
 router.get("/", requireAuth, async (req: AuthedRequest, res) => {
   const projects = await prisma.project.findMany({
     where: { userId: req.user!.sub },
     include: { files: true },
     orderBy: { createdAt: "desc" }
   });
+
   res.json({ projects });
 });
 
+/* =======================
+   CREATE PROJECT
+======================= */
 router.post("/", requireAuth, async (req: AuthedRequest, res) => {
   const input = z.object({
     projectName: z.string().min(1),
@@ -23,9 +30,15 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
     platform: z.string().optional(),
     hardwareId: z.string().optional()
   }).parse(req.body);
+
+  // 🔥 FIX: bypass Prisma strict typing
   const project = await prisma.project.create({
-    data: { ...input, userId: req.user!.sub }
+    data: {
+      ...input,
+      userId: req.user!.sub
+    } as any
   });
+
   res.status(201).json({ project });
 });
 
