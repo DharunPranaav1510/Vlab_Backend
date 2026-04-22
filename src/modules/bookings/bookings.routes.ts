@@ -23,6 +23,7 @@ router.get("/", requireAuth, async (req: AuthedRequest, res) => {
     include: { user: { select: { email: true } } },
     orderBy: { start: "asc" }
   });
+
   res.json({
     bookings: bookings.map((b) => ({
       ...b,
@@ -37,6 +38,7 @@ router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
     include: { user: { select: { email: true } } },
     orderBy: { start: "asc" }
   });
+
   res.json({
     bookings: bookings.map((b) => ({
       ...b,
@@ -50,40 +52,55 @@ router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
     where: { userId: req.user!.sub, status: { not: "CANCELLED" } },
     data: { status: "CANCELLED" }
   });
+
   res.json({ success: true });
 });
 
 router.delete("/:id", requireAuth, async (req: AuthedRequest, res) => {
   const id = String(req.params.id);
+
   const booking = await prisma.booking.findUnique({ where: { id } });
-  if (!booking) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Booking not found" } });
-  if (booking.userId !== req.user!.sub) return res.status(403).json({ error: { code: "FORBIDDEN", message: "Forbidden" } });
-  await prisma.booking.update({ where: { id }, data: { status: "CANCELLED" } });
+
+  if (!booking) {
+    return res.status(404).json({
+      error: { code: "NOT_FOUND", message: "Booking not found" }
+    });
+  }
+
+  if (booking.userId !== req.user!.sub) {
+    return res.status(403).json({
+      error: { code: "FORBIDDEN", message: "Forbidden" }
+    });
+  }
+
+  await prisma.booking.update({
+    where: { id },
+    data: { status: "CANCELLED" }
+  });
+
   res.json({ success: true });
 });
 
+
+// 🔥 FIXED NON-BLOCKING BOOKING ROUTE
 router.post("/", requireAuth, async (req: AuthedRequest, res) => {
-  const input = bookingSchema.parse(req.body);
-  const start = new Date(input.start);
-  const end = new Date(input.end);
+  try {
+    const input = bookingSchema.parse(req.body);
 
-  if (start.getTime() < Date.now()) throw new AppError("Cannot book in past", 400);
-  if (start.getTime() > Date.now() + 3 * 24 * 60 * 60 * 1000) throw new AppError("Max 3 days advance booking", 400);
-  if (input.duration > 3) throw new AppError("Max 3 consecutive slots", 400);
+    const start = new Date(input.start);
+    const end = new Date(input.end);
 
-  const overlap = await prisma.booking.findFirst({
-    where: {
-      AND: [
-        { start: { lt: end } },
-        { end: { gt: start } },
-        { status: { not: "CANCELLED" } }
-      ]
-    }
-  });
-  if (overlap) throw new AppError("Slot overlaps", 409);
+    if (start.getTime() < Date.now())
+      throw new AppError("Cannot book in past", 400);
 
-  const booking = await prisma.$transaction(async (tx) => {
-    const overlapInsideTx = await tx.booking.findFirst({
+    if (start.getTime() > Date.now() + 3 * 24 * 60 * 60 * 1000)
+      throw new AppError("Max 3 days advance booking", 400);
+
+    if (input.duration > 3)
+      throw new AppError("Max 3 consecutive slots", 400);
+
+    // overlap check
+    const overlap = await prisma.booking.findFirst({
       where: {
         AND: [
           { start: { lt: end } },
@@ -92,89 +109,99 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
         ]
       }
     });
-    if (overlapInsideTx) throw new AppError("Slot overlaps", 409);
-    return tx.booking.create({
+
+    if (overlap) throw new AppError("Slot overlaps", 409);
+
+    // ✅ CREATE BOOKING IMMEDIATELY
+    const booking = await prisma.booking.create({
       data: {
         title: input.title,
         labName: input.labName,
         start,
         end,
         duration: input.duration,
-        userId: req.user!.sub
+        userId: req.user!.sub,
+        rdpLink: null // initially empty
       }
     });
-  });
 
-  // Prototype: attempt to create MeshCentral RDP link immediately via meshctrl.
-  // This does not block booking creation; failures are tolerated and returned for visibility.
-  const hw = await prisma.hardware.findFirst({ where: { name: booking.labName } });
-  const nodeId = hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
-  const startIsoLocal = booking.start.toISOString().slice(0, 19); // "YYYY-MM-DDTHH:mm:ss"
+    // ✅ RESPOND IMMEDIATELY (NO BLOCKING)
+    res.status(201).json({
+      success: true,
+      booking,
+      message: "Booking confirmed (MeshCentral pending)"
+    });
 
-  const mesh = nodeId
-    ? await runMeshctrlDeviceshare({
-        nodeId,
-        startIsoLocal,
-        durationMinutes: env.MESH_RDP_DURATION_MINUTES
-      })
-    : {
-        command: env.MESHCTRL_PATH,
-        args: [],
-        stdout: "",
-        stderr: "No mesh node id configured (hardware.meshNodeId or DEFAULT_MESH_NODE_ID).",
-        exitCode: 1,
-        rdpLink: null
-      };
+    // 🔥 BACKGROUND PROCESS (DO NOT BLOCK)
+    (async () => {
+      try {
+        const hw = await prisma.hardware.findFirst({
+          where: { name: booking.labName }
+        });
 
-  // Print command output so you can see it in the backend terminal.
-  // eslint-disable-next-line no-console
-  console.log("[meshctrl]", mesh.command, mesh.args.join(" "));
-  if (mesh.stdout) console.log("[meshctrl][stdout]\n" + mesh.stdout);
-  if (mesh.stderr) console.error("[meshctrl][stderr]\n" + mesh.stderr);
+        const nodeId = hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
 
-  // Store extracted RDP link if present (even if meshctrl exited non-zero).
-  const updatedBooking = await prisma.booking.update({
-    where: { id: booking.id },
-    data: { rdpLink: mesh.rdpLink ?? undefined }
-  });
+        if (!nodeId) {
+          console.warn("No mesh node ID configured");
+          return;
+        }
 
-  // Still enqueue a connector task for real connector-based workflows.
-  await prisma.connectorTask.create({
-    data: {
-      type: "BOOKING_CREATE",
-      payload: {
-        bookingId: updatedBooking.id,
-        userId: updatedBooking.userId,
-        labName: updatedBooking.labName,
-        start: updatedBooking.start.toISOString(),
-        end: updatedBooking.end.toISOString(),
-        meshNodeId: nodeId
+        const mesh = await runMeshctrlDeviceshare({
+          nodeId,
+          startIsoLocal: booking.start.toISOString().slice(0, 19),
+          durationMinutes: env.MESH_RDP_DURATION_MINUTES
+        });
+
+        console.log("[meshctrl async]", mesh);
+
+        // update link if success
+        if (mesh.rdpLink) {
+          await prisma.booking.update({
+            where: { id: booking.id },
+            data: { rdpLink: mesh.rdpLink }
+          });
+        }
+
+        // optional: queue task
+        await prisma.connectorTask.create({
+          data: {
+            type: "BOOKING_CREATE",
+            payload: {
+              bookingId: booking.id,
+              userId: booking.userId,
+              labName: booking.labName,
+              start: booking.start.toISOString(),
+              end: booking.end.toISOString(),
+              meshNodeId: nodeId
+            }
+          }
+        });
+
+        addTask({
+          bookingId: booking.id,
+          userId: booking.userId,
+          userEmail: req.user?.email || booking.userId,
+          labName: booking.labName,
+          start: booking.start.toISOString(),
+          end: booking.end.toISOString(),
+          meshNodeId: nodeId,
+          durationMinutes: env.MESH_RDP_DURATION_MINUTES
+        });
+
+      } catch (err) {
+        console.error("MeshCentral async error:", err);
       }
-    }
-  });
+    })();
 
-  addTask({
-    bookingId: updatedBooking.id,
-    userId: updatedBooking.userId,
-    userEmail: req.user?.email || updatedBooking.userId,
-    labName: updatedBooking.labName,
-    start: updatedBooking.start.toISOString(),
-    end: updatedBooking.end.toISOString(),
-    meshNodeId: nodeId,
-    durationMinutes: env.MESH_RDP_DURATION_MINUTES
-  });
+  } catch (err) {
+    console.error("Booking error:", err);
 
-  res.status(201).json({
-    booking: updatedBooking,
-    meshctrl: {
-      command: mesh.command,
-      args: mesh.args,
-      exitCode: mesh.exitCode,
-      stdout: mesh.stdout,
-      stderr: mesh.stderr,
-      rdpLink: mesh.rdpLink
+    if (err instanceof AppError) {
+      return res.status(err.statusCode).json({ message: err.message });
     }
-  });
+
+    return res.status(500).json({ message: "Booking failed" });
+  }
 });
 
 export default router;
