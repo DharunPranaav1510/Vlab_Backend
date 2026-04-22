@@ -32,11 +32,7 @@ app.use(helmet());
 // CORS configuration for production
 app.use(
   cors({
-    origin: [
-      "https://virtuallabx.com",
-      "https://www.virtuallabx.com"
-    ],
-    credentials: true
+    origin: "*"
   })
 );
 app.set("trust proxy", 1);

@@ -1,36 +1,32 @@
-import { NextFunction, Request, Response } from "express";
+import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
-import { env } from "../config/env.js";
 
-type JwtPayload = { sub: string; email: string; name: string };
+const JWT_SECRET = process.env.JWT_SECRET!;
 
 export interface AuthedRequest extends Request {
-  user?: JwtPayload;
+  user?: any;
 }
 
-export function optionalAuth(req: AuthedRequest, _res: Response, next: NextFunction) {
-  const auth = req.headers.authorization;
-  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : req.cookies?.token;
-  if (!token) return next();
+export const requireAuth = (
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction
+) => {
   try {
-    req.user = jwt.verify(token, env.JWT_SECRET) as JwtPayload;
-  } catch {
-    req.user = undefined;
-  }
-  next();
-}
+    const authHeader = req.headers.authorization;
 
-export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
-  optionalAuth(req, res, () => {
-    if (!req.user) return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    req.user = decoded;
+
     next();
-  });
-}
-
-export function requireConnectorAuth(req: Request, res: Response, next: NextFunction) {
-  const apiKey = req.headers["x-connector-key"];
-  if (apiKey !== env.CONNECTOR_API_KEY) {
-    return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Invalid connector key" } });
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid token" });
   }
-  next();
-}
+};

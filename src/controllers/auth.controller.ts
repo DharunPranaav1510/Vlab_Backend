@@ -56,13 +56,6 @@ export const authController = {
 
     const { user, token } = await authService.login(input as any);
 
-    // 🔥 FIX: correct cookie for cross-origin
-    res.cookie("token", token, {
-      httpOnly: true,
-      sameSite: "none",   // ✅ REQUIRED
-      secure: true        // ✅ REQUIRED (HTTPS)
-    });
-
     return res.json({
       token,
       user: {
@@ -82,13 +75,6 @@ export const authController = {
     );
 
     const token = authService.signToken(user);
-
-    // 🔥 FIX here also
-    res.cookie("token", token, {
-      httpOnly: true,
-      sameSite: "none",
-      secure: true
-    });
 
     return res.json({
       token,
@@ -139,12 +125,6 @@ export const authController = {
   },
 
   logout(_req: Request, res: Response) {
-    res.clearCookie("token", {
-      httpOnly: true,
-      sameSite: "none",
-      secure: false
-    });
-
     return res.json({ success: true });
   }
 };
