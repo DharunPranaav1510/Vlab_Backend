@@ -142,7 +142,7 @@ export const authController = {
     res.clearCookie("token", {
       httpOnly: true,
       sameSite: "none",
-      secure: true
+      secure: false
     });
 
     return res.json({ success: true });
