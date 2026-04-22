@@ -16,8 +16,8 @@ router.post("/", requireAuth, async (req, res) => {
     description: z.string().optional(),
     vmTemplate: z.string().optional(),
     meshNodeId: z.string().optional()
-  }).parse(req.body);
-  const item = await prisma.hardware.create({ data: input });
+  }).parse(req.body as any);
+  const item = await prisma.hardware.create({ data: req.body as any });
   res.status(201).json({ hardware: item });
 });
 
