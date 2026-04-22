@@ -61,7 +61,7 @@ export const authController = {
     res.cookie("token", token, {
       httpOnly: true,
       sameSite: "lax",
-      secure: false
+      secure: true
     });
 
     return res.json({
