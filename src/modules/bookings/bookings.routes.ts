@@ -4,6 +4,7 @@ import { prisma } from "../../config/prisma.js";
 import { requireAuth, AuthedRequest } from "../../middleware/auth.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { env } from "../../config/env.js";
+import { addTask } from "../connector/connector.routes.js";
 
 const router = Router();
 
@@ -146,7 +147,7 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
         payload: {
           bookingId: booking.id,
           userId: booking.userId,
-          userEmail: req.user!.email, // 🔥 REQUIRED
+          userEmail: req.user!.email,
           labName: booking.labName,
           start: booking.start.toISOString(),
           end: booking.end.toISOString(),
@@ -154,6 +155,18 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
           durationMinutes: env.MESH_RDP_DURATION_MINUTES
         }
       }
+    });
+
+    // 🔥 PUSH TO CONNECTOR QUEUE (CRITICAL)
+    addTask({
+      bookingId: booking.id,
+      userId: booking.userId,
+      userEmail: req.user!.email,
+      labName: booking.labName,
+      start: booking.start.toISOString(),
+      end: booking.end.toISOString(),
+      meshNodeId: nodeId,
+      durationMinutes: env.MESH_RDP_DURATION_MINUTES
     });
 
     // ✅ RESPOND TO FRONTEND (UNCHANGED)
