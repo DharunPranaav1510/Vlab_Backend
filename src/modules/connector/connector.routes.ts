@@ -131,4 +131,50 @@ router.post("/callback", (req, res) => {
   res.json({ success: true });
 });
 
+// ================= COMPAT ROUTES FOR PYTHON CONNECTOR =================
+
+// 🔥 /connector/poll (matches Python)
+router.get("/poll", (req, res) => {
+  const auth = req.headers.authorization;
+
+  if (auth !== `Bearer ${process.env.SECRET_TOKEN}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (taskQueue.length === 0) {
+    return res.json(null);
+  }
+
+  const task = taskQueue.shift();
+  return res.json(task);
+});
+
+// 🔥 /connector/result (matches Python)
+router.post("/result", async (req, res) => {
+  const auth = req.headers.authorization;
+
+  if (auth !== `Bearer ${process.env.SECRET_TOKEN}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { bookingId, rdpLink, success } = req.body;
+
+  try {
+    console.log("Connector result:", req.body);
+
+    if (success && bookingId && rdpLink) {
+      await prisma.booking.update({
+        where: { id: bookingId },
+        data: { rdpLink }
+      });
+    }
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error("Connector result error:", err);
+    return res.status(500).json({ error: "Failed to update" });
+  }
+});
+
 export default router;
