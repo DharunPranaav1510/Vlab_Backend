@@ -4,8 +4,6 @@ import { prisma } from "../../config/prisma.js";
 import { requireAuth, AuthedRequest } from "../../middleware/auth.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { env } from "../../config/env.js";
-import { runMeshctrlDeviceshare } from "../../services/meshctrl.service.js";
-import { addTask } from "../connector/connector.routes.js";
 
 const router = Router();
 
@@ -17,6 +15,8 @@ const bookingSchema = z.object({
   duration: z.number().int().min(1).max(4)
 });
 
+
+// ================= GET USER BOOKINGS =================
 router.get("/", requireAuth, async (req: AuthedRequest, res) => {
   const bookings = await prisma.booking.findMany({
     where: { userId: req.user!.sub },
@@ -32,6 +32,8 @@ router.get("/", requireAuth, async (req: AuthedRequest, res) => {
   });
 });
 
+
+// ================= GET ALL BOOKINGS =================
 router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
   const bookings = await prisma.booking.findMany({
     where: { status: { not: "CANCELLED" } },
@@ -47,6 +49,8 @@ router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
   });
 });
 
+
+// ================= DELETE MY BOOKINGS =================
 router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
   await prisma.booking.updateMany({
     where: { userId: req.user!.sub, status: { not: "CANCELLED" } },
@@ -56,6 +60,8 @@ router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
   res.json({ success: true });
 });
 
+
+// ================= DELETE SINGLE =================
 router.delete("/:id", requireAuth, async (req: AuthedRequest, res) => {
   const id = String(req.params.id);
 
@@ -82,7 +88,7 @@ router.delete("/:id", requireAuth, async (req: AuthedRequest, res) => {
 });
 
 
-// 🔥 FIXED NON-BLOCKING BOOKING ROUTE
+// ================= CREATE BOOKING =================
 router.post("/", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const input = bookingSchema.parse(req.body);
@@ -112,7 +118,7 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
 
     if (overlap) throw new AppError("Slot overlaps", 409);
 
-    // ✅ CREATE BOOKING IMMEDIATELY
+    // ✅ CREATE BOOKING
     const booking = await prisma.booking.create({
       data: {
         title: input.title,
@@ -121,77 +127,41 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
         end,
         duration: input.duration,
         userId: req.user!.sub,
-        rdpLink: null // initially empty
+        rdpLink: null
       }
     });
 
-    // ✅ RESPOND IMMEDIATELY (NO BLOCKING)
-    res.status(201).json({
-      success: true,
-      booking,
-      message: "Booking confirmed (MeshCentral pending)"
+    // 🔥 CREATE CONNECTOR TASK (THIS IS THE KEY FIX)
+    const hw = await prisma.hardware.findFirst({
+      where: { name: booking.labName }
     });
 
-    // 🔥 BACKGROUND PROCESS (DO NOT BLOCK)
-    (async () => {
-      try {
-        const hw = await prisma.hardware.findFirst({
-          where: { name: booking.labName }
-        });
+    const nodeId =
+      hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
 
-        const nodeId = hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
-
-        if (!nodeId) {
-          console.warn("No mesh node ID configured");
-          return;
-        }
-
-        const mesh = await runMeshctrlDeviceshare({
-          nodeId,
-          startIsoLocal: booking.start.toISOString().slice(0, 19),
-          durationMinutes: env.MESH_RDP_DURATION_MINUTES
-        });
-
-        console.log("[meshctrl async]", mesh);
-
-        // update link if success
-        if (mesh.rdpLink) {
-          await prisma.booking.update({
-            where: { id: booking.id },
-            data: { rdpLink: mesh.rdpLink }
-          });
-        }
-
-        // optional: queue task
-        await prisma.connectorTask.create({
-          data: {
-            type: "BOOKING_CREATE",
-            payload: {
-              bookingId: booking.id,
-              userId: booking.userId,
-              labName: booking.labName,
-              start: booking.start.toISOString(),
-              end: booking.end.toISOString(),
-              meshNodeId: nodeId
-            }
-          }
-        });
-
-        addTask({
+    await prisma.connectorTask.create({
+      data: {
+        type: "BOOKING_CREATE",
+        status: "PENDING",
+        payload: {
           bookingId: booking.id,
           userId: booking.userId,
-          userEmail: req.user?.email || booking.userId,
+          userEmail: req.user!.email, // 🔥 REQUIRED
           labName: booking.labName,
           start: booking.start.toISOString(),
           end: booking.end.toISOString(),
           meshNodeId: nodeId,
           durationMinutes: env.MESH_RDP_DURATION_MINUTES
-        });
-
-      } catch (err) {
-        console.error("MeshCentral async error:", err);
+        }
       }
-    })();
+    });
+
+    // ✅ RESPOND TO FRONTEND (UNCHANGED)
+    return res.status(201).json({
+      success: true,
+      booking,
+      message: "Booking confirmed"
+    });
 
   } catch (err) {
     console.error("Booking error:", err);
