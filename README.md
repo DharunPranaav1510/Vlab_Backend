@@ -104,3 +104,4 @@ src/
 - Frontend localStorage auth flow remains untouched.
 - Real backend auth is available for secure API usage.
 - Compatibility routes remain at root and return exact frontend-expected shapes.
+# VirtualLab-Backend
