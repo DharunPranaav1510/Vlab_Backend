@@ -53,9 +53,10 @@ router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
 
 // ================= DELETE MY BOOKINGS =================
 router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
-  await prisma.booking.updateMany({
-    where: { userId: req.user!.sub, status: { not: "CANCELLED" } },
-    data: { status: "CANCELLED" }
+  const userId = req.user!.sub;
+
+  await prisma.booking.deleteMany({
+    where: { userId }
   });
 
   res.json({ success: true });
