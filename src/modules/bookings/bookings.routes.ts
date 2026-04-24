@@ -15,13 +15,12 @@ const bookingSchema = z.object({
   duration: z.number().int().min(1).max(4)
 });
 
-
 // ================= GET USER BOOKINGS =================
 router.get("/", requireAuth, async (req: AuthedRequest, res) => {
   const bookings = await prisma.booking.findMany({
     where: {
       userId: req.user!.sub,
-      status: { not: "CANCELLED" } // 🔥 FIX: hide cancelled
+      status: { not: "CANCELLED" }
     },
     include: { user: { select: { email: true } } },
     orderBy: { start: "asc" }
@@ -34,7 +33,6 @@ router.get("/", requireAuth, async (req: AuthedRequest, res) => {
     }))
   });
 });
-
 
 // ================= GET ALL BOOKINGS =================
 router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
@@ -52,7 +50,6 @@ router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
   });
 });
 
-
 // ================= DELETE MY BOOKINGS =================
 router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
   const userId = req.user!.sub;
@@ -64,7 +61,6 @@ router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
 
   res.json({ success: true });
 });
-
 
 // ================= DELETE SINGLE =================
 router.delete("/:id", requireAuth, async (req: AuthedRequest, res) => {
@@ -92,7 +88,6 @@ router.delete("/:id", requireAuth, async (req: AuthedRequest, res) => {
   res.json({ success: true });
 });
 
-
 // ================= CREATE BOOKING =================
 router.post("/", requireAuth, async (req: AuthedRequest, res) => {
   try {
@@ -113,10 +108,9 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
 
     // 🔥 TRANSACTION (RACE CONDITION FIX)
     const booking = await prisma.$transaction(async (tx) => {
-
       const overlap = await tx.booking.findFirst({
         where: {
-          labName: input.labName, // 🔥 FIX: lab isolation
+          labName: input.labName,
           status: { not: "CANCELLED" },
           start: { lt: end },
           end: { gt: start }
@@ -135,11 +129,9 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
           end,
           duration: input.duration,
           userId: req.user!.sub,
-          rdpLink: null,
-          status: "ACTIVE" // 🔥 ensure status exists
+          rdpLink: null
         }
       });
-
     }, {
       isolationLevel: "Serializable"
     });
@@ -177,7 +169,6 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
       booking,
       message: "Booking confirmed"
     });
-
   } catch (err) {
     console.error("Booking error:", err);
 
