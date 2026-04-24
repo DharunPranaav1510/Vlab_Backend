@@ -12,14 +12,17 @@ const bookingSchema = z.object({
   title: z.string().min(1),
   labName: z.string().min(1),
   start: z.string().datetime(),
-  duration: z.number().int().min(1).max(4) // 🔥 FIX: removed end from input
+  duration: z.number().int().min(1).max(4)
 });
 
 
 // ================= GET USER BOOKINGS =================
 router.get("/", requireAuth, async (req: AuthedRequest, res) => {
   const bookings = await prisma.booking.findMany({
-    where: { userId: req.user!.sub },
+    where: {
+      userId: req.user!.sub,
+      status: { not: "CANCELLED" } // 🔥 FIX: hide cancelled
+    },
     include: { user: { select: { email: true } } },
     orderBy: { start: "asc" }
   });
@@ -54,7 +57,6 @@ router.get("/all", requireAuth, async (_req: AuthedRequest, res) => {
 router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
   const userId = req.user!.sub;
 
-  // 🔥 FIX: soft delete instead of hard delete
   await prisma.booking.updateMany({
     where: { userId, status: { not: "CANCELLED" } },
     data: { status: "CANCELLED" }
@@ -97,12 +99,9 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
     const input = bookingSchema.parse(req.body);
 
     const start = new Date(input.start);
+    const end = new Date(start.getTime() + input.duration * 60 * 60 * 1000);
 
-    // 🔥 FIX: compute end in backend (do NOT trust client)
-    const end = new Date(
-      start.getTime() + input.duration * 60 * 60 * 1000
-    );
-
+    // ✅ VALIDATIONS
     if (start.getTime() < Date.now())
       throw new AppError("Cannot book in past", 400);
 
@@ -112,12 +111,12 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
     if (input.duration > 4)
       throw new AppError("Max 4 consecutive slots", 400);
 
-    // 🔥 FIX: TRANSACTION + LAB FILTER + SERIALIZABLE
+    // 🔥 TRANSACTION (RACE CONDITION FIX)
     const booking = await prisma.$transaction(async (tx) => {
 
       const overlap = await tx.booking.findFirst({
         where: {
-          labName: input.labName,
+          labName: input.labName, // 🔥 FIX: lab isolation
           status: { not: "CANCELLED" },
           start: { lt: end },
           end: { gt: start }
@@ -136,12 +135,13 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
           end,
           duration: input.duration,
           userId: req.user!.sub,
-          rdpLink: null
+          rdpLink: null,
+          status: "ACTIVE" // 🔥 ensure status exists
         }
       });
 
     }, {
-      isolationLevel: "Serializable" // 🔥 CRITICAL FIX
+      isolationLevel: "Serializable"
     });
 
     // ================= CONNECTOR TASK =================
@@ -149,8 +149,7 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
       where: { name: booking.labName }
     });
 
-    const nodeId =
-      hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
+    const nodeId = hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
 
     const taskPayload = {
       bookingId: booking.id,
@@ -160,7 +159,7 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
       start: booking.start.toISOString(),
       end: booking.end.toISOString(),
       meshNodeId: nodeId,
-      durationMinutes: input.duration * 60 // 🔥 FIX: use real duration
+      durationMinutes: input.duration * 60
     };
 
     await prisma.connectorTask.create({
@@ -171,7 +170,6 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
       }
     });
 
-    // 🔥 Queue push (unchanged but safe)
     addTask(taskPayload);
 
     return res.status(201).json({
