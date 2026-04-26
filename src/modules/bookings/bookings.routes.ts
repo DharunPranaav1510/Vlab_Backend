@@ -55,7 +55,11 @@ router.delete("/mine", requireAuth, async (req: AuthedRequest, res) => {
   const userId = req.user!.sub;
 
   await prisma.booking.updateMany({
-    where: { userId, status: { not: "CANCELLED" } },
+    where: {
+      userId,
+      status: { not: "CANCELLED" },
+      start: { gt: new Date() } // 🔥 only future bookings
+    },
     data: { status: "CANCELLED" }
   });
 
@@ -94,6 +98,11 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
     const input = bookingSchema.parse(req.body);
 
     const start = new Date(input.start);
+
+    if (isNaN(start.getTime())) {
+      throw new AppError("Invalid start time", 400);
+    }
+
     const end = new Date(start.getTime() + input.duration * 60 * 60 * 1000);
 
     // ✅ VALIDATIONS
@@ -103,11 +112,8 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
     if (start.getTime() > Date.now() + 3 * 24 * 60 * 60 * 1000)
       throw new AppError("Max 3 days advance booking", 400);
 
-    if (input.duration > 4)
-      throw new AppError("Max 4 consecutive slots", 400);
-
-    // 🔥 TRANSACTION (RACE CONDITION FIX)
-    const booking = await prisma.$transaction(async (tx) => {
+    // 🔥 TRANSACTION (booking + connector task atomic)
+    const result = await prisma.$transaction(async (tx) => {
       const overlap = await tx.booking.findFirst({
         where: {
           labName: input.labName,
@@ -121,7 +127,7 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
         throw new AppError("Slot already booked", 409);
       }
 
-      return await tx.booking.create({
+      const booking = await tx.booking.create({
         data: {
           title: input.title,
           labName: input.labName,
@@ -132,43 +138,50 @@ router.post("/", requireAuth, async (req: AuthedRequest, res) => {
           rdpLink: null
         }
       });
+
+      const hw = await tx.hardware.findFirst({
+        where: { name: booking.labName }
+      });
+
+      const nodeId = hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID;
+
+      if (!nodeId) {
+        throw new AppError("No hardware configured for this lab", 500);
+      }
+
+      const taskPayload = {
+        bookingId: booking.id,
+        userId: booking.userId,
+        userEmail: req.user!.email,
+        labName: booking.labName,
+        start: booking.start.toISOString(),
+        end: booking.end.toISOString(),
+        meshNodeId: nodeId,
+        durationMinutes: input.duration * 60
+      };
+
+      await tx.connectorTask.create({
+        data: {
+          type: "BOOKING_CREATE",
+          status: "PENDING",
+          payload: taskPayload
+        }
+      });
+
+      return { booking, taskPayload };
     }, {
       isolationLevel: "Serializable"
     });
 
-    // ================= CONNECTOR TASK =================
-    const hw = await prisma.hardware.findFirst({
-      where: { name: booking.labName }
-    });
-
-    const nodeId = hw?.meshNodeId || env.DEFAULT_MESH_NODE_ID || "";
-
-    const taskPayload = {
-      bookingId: booking.id,
-      userId: booking.userId,
-      userEmail: req.user!.email,
-      labName: booking.labName,
-      start: booking.start.toISOString(),
-      end: booking.end.toISOString(),
-      meshNodeId: nodeId,
-      durationMinutes: input.duration * 60
-    };
-
-    await prisma.connectorTask.create({
-      data: {
-        type: "BOOKING_CREATE",
-        status: "PENDING",
-        payload: taskPayload
-      }
-    });
-
-    addTask(taskPayload);
+    // 🔥 push to connector ONLY after transaction succeeds
+    addTask(result.taskPayload);
 
     return res.status(201).json({
       success: true,
-      booking,
+      booking: result.booking,
       message: "Booking confirmed"
     });
+
   } catch (err) {
     console.error("Booking error:", err);
 
